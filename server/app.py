@@ -799,11 +799,8 @@ if __name__ == "__main__":
         log_level="info",
     )
 
+from fastapi.responses import RedirectResponse
+
 @app.get("/")
 def root():
-    return {
-        "message": "CRM Sanitizer API is running 🚀",
-        "docs": "/docs",
-        "health": "/health",
-        "web": "/web"
-    }
+    return RedirectResponse(url="/web")
