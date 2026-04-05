@@ -1,3 +1,12 @@
+---
+title: CRM Sanitizer
+emoji: 🧹
+colorFrom: blue
+colorTo: green
+sdk: docker
+app_port: 7860
+---
+
 # 🧹 CRM Sanitizer
 
 > **CRM Sanitizer** is an OpenEnv benchmark where AI agents clean, audit,
