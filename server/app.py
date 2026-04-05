@@ -798,3 +798,12 @@ if __name__ == "__main__":
         workers=1,
         log_level="info",
     )
+
+@app.get("/")
+def root():
+    return {
+        "message": "CRM Sanitizer API is running 🚀",
+        "docs": "/docs",
+        "health": "/health",
+        "web": "/web"
+    }
