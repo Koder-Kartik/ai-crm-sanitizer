@@ -1,0 +1,39 @@
+# pyproject.toml
+# CRM Sanitizer — Package metadata
+# Required by openenv validate for multi-mode deployment
+
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "crm-sanitizer"
+version = "1.0.0"
+description = "CRM Sanitizer: An OpenEnv benchmark where AI agents clean, audit, and reason over messy customer data"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi==0.104.1",
+    "uvicorn==0.24.0",
+    "pandas==2.1.4",
+    "numpy==1.26.2",
+    "tabulate==0.9.0",
+    "pydantic==2.5.3",
+    "openai==1.6.1",
+    "python-dotenv==1.0.0",
+    "httpx==0.25.2",
+    "openenv-core>=0.2.2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["crm_sanitizer*"]
+
+[project.urls]
+Homepage = "https://huggingface.co/spaces/KoderKartik/crm-sanitizer"
