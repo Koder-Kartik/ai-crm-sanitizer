@@ -782,7 +782,12 @@ function setResult(msg, cls) {
 # ENTRY POINT
 # ─────────────────────────────────────────────
 
-if __name__ == "__main__":
+def main():
+    """
+    Main entry point for the CRM Sanitizer server.
+    Called by openenv and by direct execution.
+    Required by openenv validate.
+    """
     port = int(os.environ.get("PORT", 7860))
     host = os.environ.get("HOST", "0.0.0.0")
 
@@ -798,6 +803,10 @@ if __name__ == "__main__":
         workers=1,
         log_level="info",
     )
+
+
+if __name__ == "__main__":
+    main()
 
 from fastapi.responses import RedirectResponse
 
