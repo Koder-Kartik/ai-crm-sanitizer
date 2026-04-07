@@ -45,6 +45,7 @@ REWARD_EXPLORE        = +0.00   # get_column_stats: neutral, no penalty
 # against ground truth in a forgiving way
 # ─────────────────────────────────────────────
 
+
 def normalize_phone(value: str) -> str:
     """
     Strip all non-digit characters from a phone number.
@@ -594,6 +595,16 @@ class EpisodeGrader:
         value: str,
         current_table: List[Dict[str, Any]],
     ) -> Tuple[float, str]:
+        
+        # ── Protect system columns ──
+        # uid is immutable — agent should never try to fix it
+        if column == "uid" and operation not in ("remove_duplicate", "submit", "get_column_stats"):
+            self.total_reward += REWARD_WRONG_FIX
+            return (
+                REWARD_WRONG_FIX,
+                "error: 'uid' is a system column and cannot be modified. "
+                "Focus on data columns: name, email, phone, company, city, join_date, loyalty_points"
+            )
         """
         Route action to the correct grader.
         Returns (reward, result_message).
@@ -611,7 +622,12 @@ class EpisodeGrader:
             return self.grade_fix_value(uid, column, value, current_table)
 
         elif operation == "get_column_stats":
-            # Exploration action — no reward, no penalty
+            stats_key = ("STATS", column, "get_column_stats")
+            if stats_key in self.action_history:
+                # Penalize repeated stats on same column
+                self.total_reward += REWARD_REDUNDANT
+                return REWARD_REDUNDANT, f"redundant: already checked stats for '{column}'"
+            self.action_history[stats_key] = True
             stats = get_column_stats(current_table, column)
             return REWARD_EXPLORE, f"stats: {stats}"
 

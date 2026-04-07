@@ -168,6 +168,14 @@ class CRMObservation(Observation):
         )
     )
 
+    recent_actions: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Last 5 actions taken this episode with their results. "
+            "Agent should NOT repeat actions already listed here."
+        )
+    )
+
 
 # ─────────────────────────────────────────────
 # CRM SANITIZER — STATE

@@ -164,6 +164,7 @@ class CRMEnvironment:
         self._done: bool = False
         self._seed: int = 42
         self._task_id: str = ""
+        self._recent_actions: List[str] = []
 
     # ─────────────────────────────────────────
     # reset()
@@ -197,6 +198,7 @@ class CRMEnvironment:
         self._episode_id = episode_id or str(uuid.uuid4())
         self._step_count = 0
         self._done       = False
+        self._recent_actions = []
 
         # Generate fresh dirty dataset using seed
         self._task_data = generate_task(task_id, self._seed)
@@ -262,6 +264,8 @@ class CRMEnvironment:
             )
 
         self._step_count += 1
+        # Track action for agent memory
+        action_summary = f"{action.operation}(uid={action.row_uid},col={action.column!r})"
 
         # Log the agent's reasoning if provided
         if action.reason:
@@ -341,6 +345,14 @@ class CRMEnvironment:
             value=action.value,
             current_table=self._current_table,
         )
+
+        # Add to recent actions memory
+        self._recent_actions.append(
+            f"Step {self._step_count}: {action_summary} → {result_message[:60]}"
+        )
+        # Keep only last 5
+        if len(self._recent_actions) > 5:
+            self._recent_actions = self._recent_actions[-5:]
 
         # ── Check if episode is done ──
         done = False
@@ -425,4 +437,5 @@ class CRMEnvironment:
             task_id=self._task_id,
             step_number=self._step_count,
             column_stats=column_stats,
+            recent_actions     = self._recent_actions,   
         )

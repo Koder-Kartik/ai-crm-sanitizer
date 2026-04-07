@@ -1,17 +1,21 @@
 # inference.py
 # CRM Sanitizer — Baseline Inference Script
 #
-# Uses OpenAI client pointed at Hugging Face Inference API
-# This is the correct approach for HF-compatible endpoints
+# SETUP (PowerShell):
+#   $env:HF_TOKEN="hf_your_token_here"
+#   $env:API_BASE_URL="https://router.huggingface.co/v1"
+#   $env:MODEL_NAME="Qwen/Qwen2.5-72B-Instruct"
+#   $env:SERVER_URL="http://localhost:7860"
 #
-# SETUP:
-#   export HF_TOKEN=hf_your_token_here
-#   export MODEL_NAME=Qwen/Qwen2.5-72B-Instruct
-#   export API_BASE_URL=https://api-inference.huggingface.co/v1
-#
-# Then run:
+# Run ALL tasks:
 #   python inference.py
+#
+# Run ONE task at a time (saves tokens):
+#   python inference.py --task easy
+#   python inference.py --task medium
+#   python inference.py --task hard
 
+import argparse
 import json
 import os
 import re
@@ -24,16 +28,17 @@ from openai import OpenAI
 
 # ─────────────────────────────────────────────
 # CONFIGURATION
+# All values from environment variables
 # ─────────────────────────────────────────────
 
 API_BASE_URL = os.environ.get(
     "API_BASE_URL",
-    "https://api-inference.huggingface.co/v1"   # HF OpenAI-compatible endpoint
+    "https://router.huggingface.co/v1"      # HF Router default
 )
 
 MODEL_NAME = os.environ.get(
     "MODEL_NAME",
-    "Qwen/Qwen2.5-72B-Instruct"   # Best free model on HF with chat support
+    "Qwen/Qwen2.5-72B-Instruct"             # Best free HF model
 )
 
 API_KEY = os.environ.get(
@@ -41,12 +46,12 @@ API_KEY = os.environ.get(
     os.environ.get("OPENAI_API_KEY", "")
 )
 
-SERVER_URL       = os.environ.get("SERVER_URL", "http://localhost:7860")
-BENCHMARK        = "crm-sanitizer-v1"
-BASELINE_SEED    = 42
+SERVER_URL        = os.environ.get("SERVER_URL", "http://localhost:7860")
+BENCHMARK         = "crm-sanitizer-v1"
+BASELINE_SEED     = 42
 SUCCESS_THRESHOLD = 0.40
-TEMPERATURE      = 0.01   # near-zero but not zero — HF models sometimes reject 0.0
-MAX_TOKENS       = 512    # keep small — HF free tier has limits
+TEMPERATURE       = 0.01
+MAX_TOKENS        = 512
 
 MAX_STEPS = {
     "easy_basic_fix":      15,
@@ -54,10 +59,12 @@ MAX_STEPS = {
     "hard_full_audit":     30,
 }
 
+ALL_TASKS = ["easy_basic_fix", "medium_format_dedup", "hard_full_audit"]
+
 
 # ─────────────────────────────────────────────
 # REQUIRED LOG FUNCTIONS
-# DO NOT change these — judges parse them exactly
+# Judges parse these exactly — do not change
 # ─────────────────────────────────────────────
 
 def log_start(task: str, env: str, model: str) -> None:
@@ -74,8 +81,8 @@ def log_step(
     error_str = error if error else "null"
     print(
         f"[STEP] step={step} "
-        f"action={action!r} "
-        f"reward={reward:.4f} "
+        f"action={action} "
+        f"reward={reward:.2f} "
         f"done={str(done).lower()} "
         f"error={error_str}",
         flush=True,
@@ -88,11 +95,11 @@ def log_end(
     score: float,
     rewards: List[float],
 ) -> None:
-    rewards_str = json.dumps([round(r, 4) for r in rewards])
+    # Spec format: rewards=0.15,0.15,0.60  (no brackets, 2dp)
+    rewards_str = ",".join(f"{r:.2f}" for r in rewards)
     print(
         f"[END] success={str(success).lower()} "
         f"steps={steps} "
-        f"score={score:.4f} "
         f"rewards={rewards_str}",
         flush=True,
     )
@@ -100,78 +107,53 @@ def log_end(
 
 # ─────────────────────────────────────────────
 # SYSTEM PROMPT
-# Kept short — HF free models have context limits
-# Very explicit JSON instructions — no assumptions
 # ─────────────────────────────────────────────
 
-SYSTEM_PROMPT = """You are a CRM data cleaning agent.
-You will see a table with customer data that has quality issues.
-Your job is to fix all issues by responding with ONE JSON action at a time.
+SYSTEM_PROMPT = """You are a CRM data cleaning agent. Fix data quality issues one at a time.
 
-RESPOND WITH ONLY A JSON OBJECT. NO OTHER TEXT. NO EXPLANATION.
-DO NOT wrap in markdown. DO NOT add ```json. JUST the raw JSON.
+RESPOND WITH ONLY RAW JSON. NO MARKDOWN. NO EXPLANATION. JUST THE JSON OBJECT.
 
-AVAILABLE ACTIONS:
+JSON FORMAT:
+{"operation":"OPERATION_NAME","column":"COLUMN","row_uid":UID,"value":"VALUE","reason":"REASON"}
 
-Fix missing value:
-{"operation":"fill_missing","column":"email","row_uid":1003,"value":"john@co.com","reason":"was null"}
-
-Remove duplicate row:
-{"operation":"remove_duplicate","column":"","row_uid":1099,"value":"","reason":"duplicate"}
-
-Fix phone format (use format: (XXX) XXX-XXXX):
-{"operation":"standardize_format","column":"phone","row_uid":1008,"value":"(555) 123-4567","reason":"bad format"}
-
-Fix wrong value:
-{"operation":"fix_value","column":"loyalty_points","row_uid":1006,"value":"250","reason":"was negative"}
-
-Check a column before fixing:
-{"operation":"get_column_stats","column":"phone","row_uid":-1,"value":"","reason":"exploring"}
-
-Fix entire column format at once:
-{"operation":"bulk_fix_column","column":"city","row_uid":-1,"value":"New York","reason":"all cities need fix"}
-
-Flag ambiguous data:
-{"operation":"flag_ambiguous","column":"email","row_uid":1042,"value":"FLAGGED","reason":"two valid options"}
-
-Submit when done:
-{"operation":"submit","column":"","row_uid":-1,"value":"","reason":"done"}
+OPERATIONS:
+- fill_missing: fill a null/MISSING cell
+- remove_duplicate: remove a duplicate row
+- standardize_format: fix phone/date/city format for ONE row
+- fix_value: fix wrong value (negative numbers etc)
+- bulk_fix_column: fix all format issues in entire column at once
+- get_column_stats: explore a column (use before fixing)
+- flag_ambiguous: flag a row with genuinely ambiguous data
+- submit: call this when ALL issues are fixed
 
 RULES:
-- Only ONE JSON object per response
-- Use row uid numbers from the uid column
-- Missing values shown as: MISSING
-- Phone format must be: (XXX) XXX-XXXX
-- Date format must be: YYYY-MM-DD
-- City names must be Title Case
-- loyalty_points must be >= 0
-- Submit only when all issues are fixed
-"""
+1. Use the uid number from the uid column (e.g. 1001, 2003, 3015)
+2. row_uid=-1 only for bulk_fix_column and get_column_stats
+3. Phones must be: (XXX) XXX-XXXX
+4. Dates must be: YYYY-MM-DD
+5. Cities must be: Title Case (e.g. New York not new york)
+6. loyalty_points must be >= 0
+7. MISSING in a cell = null value, fill it
+8. Submit only when ALL issues are fixed
+9. Do NOT repeat an action you already took on the same uid+column"""
 
 
 # ─────────────────────────────────────────────
-# ROBUST ACTION PARSER
-# Handles all the ways HF models format output
-# Never crashes — always returns valid action
+# VALID OPERATIONS
 # ─────────────────────────────────────────────
 
-# All valid operations — anything else gets rejected
 VALID_OPERATIONS = {
-    "fill_missing",
-    "remove_duplicate",
-    "standardize_format",
-    "fix_value",
-    "get_column_stats",
-    "bulk_fix_column",
-    "flag_ambiguous",
-    "submit",
+    "fill_missing", "remove_duplicate", "standardize_format",
+    "fix_value", "get_column_stats", "bulk_fix_column",
+    "flag_ambiguous", "submit",
 }
 
+
+# ─────────────────────────────────────────────
+# ACTION PARSER
+# ─────────────────────────────────────────────
+
 def parse_action(text: str) -> Dict[str, Any]:
-    """
-    Parse LLM text into action dict.
-    Handles every messy format HF models produce.
-    """
     safe_default = {
         "operation": "submit",
         "column":    "",
@@ -184,48 +166,34 @@ def parse_action(text: str) -> Dict[str, Any]:
         return safe_default
 
     text = text.strip()
-
-    # ── Step 1: Strip markdown fences ──
-    # Some models wrap in ```json ... ``` or ``` ... ```
     text = re.sub(r"```(?:json)?\s*", "", text)
-    text = re.sub(r"```",             "", text)
+    text = re.sub(r"```", "", text)
     text = text.strip()
 
-    # ── Step 2: Extract first JSON object ──
-    # Models sometimes add explanation text before or after
     json_match = re.search(r"\{[^{}]*\}", text, re.DOTALL)
     if not json_match:
-        # Try broader match with nested braces
         json_match = re.search(r"\{.*\}", text, re.DOTALL)
-    
+
     if json_match:
         text = json_match.group(0)
     else:
-        print(f"[DEBUG] No JSON found in: {text[:100]!r}", flush=True)
+        print(f"[DEBUG] No JSON in: {text[:80]!r}", flush=True)
         return safe_default
 
-    # ── Step 3: Parse JSON ──
     try:
         data = json.loads(text)
     except json.JSONDecodeError:
-        # Try fixing common JSON errors
-        # Single quotes instead of double quotes
         text = text.replace("'", '"')
-        # Trailing commas
         text = re.sub(r",\s*}", "}", text)
         text = re.sub(r",\s*]", "]", text)
         try:
             data = json.loads(text)
         except json.JSONDecodeError:
-            print(f"[DEBUG] JSON parse failed: {text[:100]!r}", flush=True)
+            print(f"[DEBUG] JSON parse failed: {text[:80]!r}", flush=True)
             return safe_default
 
-    # ── Step 4: Extract and validate fields ──
     operation = str(data.get("operation", "submit")).strip().lower()
-
-    # If model returned invalid operation name try to fix it
     if operation not in VALID_OPERATIONS:
-        # Try partial match
         for valid_op in VALID_OPERATIONS:
             if valid_op in operation or operation in valid_op:
                 operation = valid_op
@@ -233,7 +201,6 @@ def parse_action(text: str) -> Dict[str, Any]:
         else:
             operation = "submit"
 
-    # Safe extraction of all fields
     try:
         row_uid = int(data.get("row_uid", data.get("uid", -1)))
     except (ValueError, TypeError):
@@ -241,84 +208,80 @@ def parse_action(text: str) -> Dict[str, Any]:
 
     return {
         "operation": operation,
-        "column":    str(data.get("column",  "")).strip(),
+        "column":    str(data.get("column", "")).strip(),
         "row_uid":   row_uid,
-        "value":     str(data.get("value",   "")).strip(),
-        "reason":    str(data.get("reason",  "")).strip(),
+        "value":     str(data.get("value", "")).strip(),
+        "reason":    str(data.get("reason", "")).strip(),
     }
 
 
 # ─────────────────────────────────────────────
 # OBSERVATION FORMATTER
-# Kept concise — HF models have smaller context
 # ─────────────────────────────────────────────
 
-def format_observation(obs) -> str:
-    """
-    Format observation into concise text for HF models.
-    Smaller than before — fits in limited context windows.
-    """
+def format_observation(obs, history: List[str]) -> str:
     lines = []
 
-    lines.append(f"TASK: {obs.task_description}")
-    lines.append(f"Progress: {obs.issues_fixed}/{obs.total_issues} fixed | Step {obs.step_number}")
+    remaining = (obs.total_issues or 0) - (obs.issues_fixed or 0)
+    lines.append(
+        f"Progress: {obs.issues_fixed or 0} fixed, "
+        f"{remaining} remaining out of {obs.total_issues or 0} total"
+    )
 
-    if obs.last_action_result:
-        lines.append(f"Last result: {obs.last_action_result}")
+    if obs.last_action_result and "Episode started" not in obs.last_action_result:
+        lines.append(f"Last action result: {obs.last_action_result}")
 
-    # Hints
+    # Recent actions memory — stops agent repeating itself
+    if hasattr(obs, 'recent_actions') and obs.recent_actions:
+        lines.append("\nACTIONS ALREADY TAKEN (DO NOT REPEAT THESE):")
+        for a in obs.recent_actions:
+            lines.append(f"  ✓ {a}")
+
     if obs.issues_remaining:
         lines.append("\nISSUES TO FIX:")
         for hint in obs.issues_remaining:
             lines.append(f"  - {hint}")
+    else:
+        lines.append("\nNo hints. Find issues by reading the table carefully.")
 
-    # Column stats
     if obs.column_stats and not obs.column_stats.get("error"):
         s = obs.column_stats
         lines.append(
-            f"\nSTATS for '{s.get('column','')}': "
-            f"nulls={s.get('null_count',0)} "
-            f"unique={s.get('unique_count',0)} "
-            f"samples={s.get('sample_values',[])}"
+            f"\nColumn '{s.get('column','')}' stats: "
+            f"nulls={s.get('null_count',0)}, "
+            f"samples={s.get('sample_values',[])[:3]}"
         )
 
-    lines.append(f"\nTABLE:\n{obs.table_markdown}")
+    if history:
+        lines.append("\nRecent actions:")
+        for h in history[-3:]:
+            lines.append(f"  {h}")
+
+    lines.append(f"\nCURRENT TABLE:\n{obs.table_markdown}")
+
+    if remaining == 0:
+        lines.append("\nALL ISSUES FIXED. Call submit now.")
+    elif obs.issues_remaining:
+        lines.append("\nFix the next issue from the list above.")
 
     return "\n".join(lines)
 
 
 # ─────────────────────────────────────────────
 # LLM CALL
-# OpenAI client pointed at HF endpoint
 # ─────────────────────────────────────────────
 
-def call_llm(
-    client: OpenAI,
-    step: int,
-    observation_text: str,
-    history: List[str],
-) -> str:
-    """
-    Call LLM via OpenAI client pointed at HF endpoint.
-    Returns raw text. Falls back to submit on any error.
-    """
-    # Keep history short — HF models have context limits
-    history_text = ""
-    if history:
-        recent = history[-3:]   # only last 3 steps
-        history_text = "\nRECENT ACTIONS:\n" + "\n".join(recent)
-
+def call_llm(client: OpenAI, step: int, observation_text: str) -> str:
     user_prompt = (
-        f"Step {step}.\n\n"
-        f"{observation_text}"
-        f"{history_text}\n\n"
+        f"Step {step}. Current state:\n\n"
+        f"{observation_text}\n\n"
         f"Respond with ONE JSON action only:"
     )
 
     try:
         completion = client.chat.completions.create(
-            model      = MODEL_NAME,
-            messages   = [
+            model       = MODEL_NAME,
+            messages    = [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user",   "content": user_prompt},
             ],
@@ -326,13 +289,12 @@ def call_llm(
             max_tokens  = MAX_TOKENS,
             stream      = False,
         )
-
         text = (completion.choices[0].message.content or "").strip()
-        print(f"[DEBUG] LLM raw response: {text[:150]!r}", flush=True)
+        print(f"[DEBUG] LLM: {text[:120]!r}", flush=True)
         return text if text else '{"operation":"submit","column":"","row_uid":-1,"value":""}'
 
     except Exception as exc:
-        print(f"[DEBUG] LLM call failed at step {step}: {exc}", flush=True)
+        print(f"[DEBUG] LLM failed step {step}: {exc}", flush=True)
         return '{"operation":"submit","column":"","row_uid":-1,"value":""}'
 
 
@@ -340,14 +302,7 @@ def call_llm(
 # SINGLE TASK RUNNER
 # ─────────────────────────────────────────────
 
-def run_task(
-    client: OpenAI,
-    task_id: str,
-    seed: int = BASELINE_SEED,
-) -> float:
-    """
-    Run one complete episode. Returns score 0.0-1.0.
-    """
+def run_task(client: OpenAI, task_id: str, seed: int = BASELINE_SEED) -> float:
     from client import CRMSanitizerEnv, CRMAction
 
     max_steps   = MAX_STEPS[task_id]
@@ -366,8 +321,8 @@ def run_task(
             obs    = result.observation
 
             print(
-                f"[DEBUG] Task '{task_id}' started. "
-                f"Total issues: {obs.total_issues}. "
+                f"[DEBUG] '{task_id}' started. "
+                f"Issues: {obs.total_issues}. "
                 f"Max steps: {max_steps}",
                 flush=True,
             )
@@ -377,9 +332,9 @@ def run_task(
                 if result.done:
                     break
 
-                obs_text     = format_observation(obs)
-                raw_response = call_llm(client, step, obs_text, history)
-                action_dict  = parse_action(raw_response)
+                obs_text    = format_observation(obs, history)
+                raw         = call_llm(client, step, obs_text)
+                action_dict = parse_action(raw)
 
                 action = CRMAction(
                     operation = action_dict["operation"],
@@ -392,8 +347,8 @@ def run_task(
                 result = env.step(action)
                 obs    = result.observation
 
-                reward = result.reward or 0.0
-                done   = result.done
+                reward      = result.reward or 0.0
+                done        = result.done
                 rewards.append(reward)
                 steps_taken = step
 
@@ -414,15 +369,14 @@ def run_task(
 
                 history.append(
                     f"Step {step}: {action.operation} "
-                    f"uid={action.row_uid} col={action.column!r} "
-                    f"→ {obs.last_action_result} "
-                    f"(reward {reward:+.2f})"
+                    f"uid={action.row_uid} "
+                    f"→ reward={reward:+.2f} "
+                    f"({obs.last_action_result})"
                 )
 
                 if done:
                     break
 
-            # Final score calculation
             total_issues = obs.total_issues or 1
             max_reward   = (total_issues * 0.15) + 0.60
             total_reward = sum(rewards)
@@ -430,11 +384,11 @@ def run_task(
             success      = score >= SUCCESS_THRESHOLD
 
     except ConnectionError as e:
-        print(f"[ERROR] Cannot connect to server: {e}", flush=True)
+        print(f"[ERROR] Cannot connect: {e}", flush=True)
         print(f"[ERROR] Start server: cd server && python app.py", flush=True)
 
     except Exception as e:
-        print(f"[ERROR] Task {task_id} failed: {e}", flush=True)
+        print(f"[ERROR] Task {task_id}: {e}", flush=True)
         traceback.print_exc()
 
     finally:
@@ -454,61 +408,93 @@ def run_task(
 
 def main() -> None:
 
+    # ── Parse arguments ──
+    parser = argparse.ArgumentParser(
+        description="CRM Sanitizer baseline inference script"
+    )
+    parser.add_argument(
+        "--task",
+        choices=["easy", "medium", "hard", "all"],
+        default="all",
+        help=(
+            "Which task to run. "
+            "easy=easy_basic_fix, "
+            "medium=medium_format_dedup, "
+            "hard=hard_full_audit, "
+            "all=run all three (default)"
+        )
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=BASELINE_SEED,
+        help=f"Random seed (default: {BASELINE_SEED})"
+    )
+    args = parser.parse_args()
+
+    # Map short names to task IDs
+    task_map = {
+        "easy":   "easy_basic_fix",
+        "medium": "medium_format_dedup",
+        "hard":   "hard_full_audit",
+    }
+
+    if args.task == "all":
+        tasks_to_run = ALL_TASKS
+    else:
+        tasks_to_run = [task_map[args.task]]
+
+    # ── Header ──
     print("=" * 60, flush=True)
     print("CRM Sanitizer — Baseline Inference", flush=True)
     print(f"Model:  {MODEL_NAME}", flush=True)
     print(f"Server: {SERVER_URL}", flush=True)
-    print(f"Seed:   {BASELINE_SEED}", flush=True)
+    print(f"Seed:   {args.seed}", flush=True)
+    print(f"Tasks:  {tasks_to_run}", flush=True)
     print("=" * 60, flush=True)
 
     if not API_KEY:
         print(
             "[ERROR] HF_TOKEN not set.\n"
-            "Run: export HF_TOKEN=hf_your_token_here",
+            "Run: $env:HF_TOKEN='hf_your_token_here'",
             flush=True,
         )
         sys.exit(1)
 
-    # Show which endpoint we are using
-    print(f"\n[INFO] API endpoint: {API_BASE_URL}", flush=True)
+    print(f"\n[INFO] Endpoint: {API_BASE_URL}", flush=True)
     print(f"[INFO] Model: {MODEL_NAME}\n", flush=True)
 
-    # Create OpenAI client pointed at HF
-    client = OpenAI(
-        base_url = API_BASE_URL,
-        api_key  = API_KEY,
-    )
+    client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
 
-    # Wait for environment server
-    print("[INFO] Checking server health...", flush=True)
+    # ── Check server ──
+    print("[INFO] Checking server...", flush=True)
     from client import CRMSanitizerEnv
     probe = CRMSanitizerEnv(base_url=SERVER_URL)
     if not probe.wait_until_ready(max_wait=60):
-        print(
-            f"[ERROR] Server at {SERVER_URL} not responding.\n"
-            f"Start it: cd server && python app.py",
-            flush=True,
-        )
+        print(f"[ERROR] Server not responding at {SERVER_URL}", flush=True)
         sys.exit(1)
     probe.close()
-    print("[INFO] Server is ready.\n", flush=True)
+    print("[INFO] Server ready.\n", flush=True)
 
-    # Run all three tasks
-    tasks  = ["easy_basic_fix", "medium_format_dedup", "hard_full_audit"]
+    # ── Run tasks ──
     scores = {}
 
-    for task_id in tasks:
+    for task_id in tasks_to_run:
         print(f"\n{'─' * 60}", flush=True)
-        print(f"Running task: {task_id}", flush=True)
+        print(f"Running: {task_id}", flush=True)
         print(f"{'─' * 60}", flush=True)
 
-        score          = run_task(client, task_id, seed=BASELINE_SEED)
+        score           = run_task(client, task_id, seed=args.seed)
         scores[task_id] = score
 
         print(f"\n[RESULT] {task_id}: {score:.4f}", flush=True)
-        time.sleep(3)   # small pause between tasks
 
-    # Summary
+        # Pause between tasks to avoid rate limiting
+        if task_id != tasks_to_run[-1]:
+            print("[INFO] Pausing 5s between tasks...", flush=True)
+            time.sleep(5)
+
+    # ── Summary ──
     print(f"\n{'=' * 60}", flush=True)
     print("BASELINE SCORES", flush=True)
     print(f"{'=' * 60}", flush=True)
@@ -523,12 +509,15 @@ def main() -> None:
             flush=True,
         )
 
-    avg = sum(scores.values()) / len(scores)
-    print(f"\n{'─' * 60}", flush=True)
-    print(f"{'AVERAGE SCORE':<25}  {avg:.4f}", flush=True)
+    if len(scores) > 1:
+        avg = sum(scores.values()) / len(scores)
+        print(f"\n{'─' * 60}", flush=True)
+        print(f"{'AVERAGE':<25}  {avg:.4f}", flush=True)
+
     print(f"{'=' * 60}", flush=True)
 
-    if all(s >= SUCCESS_THRESHOLD for s in scores.values()):
+    all_passed = all(s >= SUCCESS_THRESHOLD for s in scores.values())
+    if all_passed:
         print("\n✓ All tasks passed.", flush=True)
         sys.exit(0)
     else:
