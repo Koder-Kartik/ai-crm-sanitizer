@@ -14,7 +14,7 @@
 #
 # FINAL SCORE:
 #   total_reward / max_possible_reward
-#   clamped to [0.0, 1.0]
+#   clamped to (0.01, 0.99) — strictly open interval
 #
 # DETERMINISM GUARANTEE:
 #   This grader has zero randomness.
@@ -37,6 +37,10 @@ REWARD_REDUNDANT      = -0.03   # agent fixed same issue twice
 REWARD_SUBMIT_SUCCESS = +0.60   # submitted with all issues resolved
 REWARD_SUBMIT_PARTIAL = -0.40   # submitted with issues still remaining
 REWARD_EXPLORE        = +0.00   # get_column_stats: neutral, no penalty
+
+# Score boundaries — strictly open interval required by validator
+SCORE_MIN = 0.01
+SCORE_MAX = 0.99
 
 
 # ─────────────────────────────────────────────
@@ -490,8 +494,9 @@ class EpisodeGrader:
             self.total_reward += REWARD_CORRECT_FIX
             fixed_count += 1
 
+        total_bulk_reward = REWARD_CORRECT_FIX * fixed_count
         return (
-            REWARD_CORRECT_FIX * fixed_count,
+            total_bulk_reward,
             f"success: bulk fixed {fixed_count} issues in '{column}'"
         )
 
@@ -595,20 +600,24 @@ class EpisodeGrader:
         value: str,
         current_table: List[Dict[str, Any]],
     ) -> Tuple[float, str]:
-        
+        """
+        Route action to the correct grader.
+        Returns (reward, result_message).
+        """
         # ── Protect system columns ──
         # uid is immutable — agent should never try to fix it
-        if column == "uid" and operation not in ("remove_duplicate", "submit", "get_column_stats"):
+        # NOTE: this guard must come BEFORE the routing block,
+        # and must not contain a bare return that skips routing.
+        if column == "uid" and operation not in (
+            "remove_duplicate", "submit", "get_column_stats"
+        ):
             self.total_reward += REWARD_WRONG_FIX
             return (
                 REWARD_WRONG_FIX,
                 "error: 'uid' is a system column and cannot be modified. "
                 "Focus on data columns: name, email, phone, company, city, join_date, loyalty_points"
             )
-        """
-        Route action to the correct grader.
-        Returns (reward, result_message).
-        """
+
         if operation == "fill_missing":
             return self.grade_fill_missing(uid, column, value, current_table)
 
@@ -655,13 +664,28 @@ class EpisodeGrader:
         Returns score strictly between 0.0 and 1.0 exclusive.
         Validator requires score in open interval (0, 1).
         Minimum: 0.01, Maximum: 0.99
+
+        Edge cases guarded:
+        - max_possible_reward <= 0  → return SCORE_MIN
+        - raw score <= 0.0          → clamp to SCORE_MIN
+        - raw score >= 1.0          → clamp to SCORE_MAX
+        - any non-finite float      → return SCORE_MIN
         """
         if self.max_possible_reward <= 0:
-            return 0.01
+            return SCORE_MIN
 
-        raw = self.total_reward / self.max_possible_reward
+        try:
+            raw = self.total_reward / self.max_possible_reward
+        except ZeroDivisionError:
+            return SCORE_MIN
+
+        # Guard against NaN or Inf before clamping
+        import math
+        if not math.isfinite(raw):
+            return SCORE_MIN
+
         # Clamp to strictly open interval (0.01, 0.99)
-        return float(max(0.01, min(0.99, raw)))
+        return float(max(SCORE_MIN, min(SCORE_MAX, raw)))
 
     def progress_summary(self) -> Dict[str, Any]:
         """
