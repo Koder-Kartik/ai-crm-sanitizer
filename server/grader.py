@@ -652,14 +652,16 @@ class EpisodeGrader:
 
     def final_score(self) -> float:
         """
-        Returns normalized score between 0.0 and 1.0.
-        total_reward / max_possible_reward, clamped.
+        Returns score strictly between 0.0 and 1.0 exclusive.
+        Validator requires score in open interval (0, 1).
+        Minimum: 0.01, Maximum: 0.99
         """
         if self.max_possible_reward <= 0:
-            return 0.0
+            return 0.01
 
         raw = self.total_reward / self.max_possible_reward
-        return float(max(0.0, min(1.0, raw)))
+        # Clamp to strictly open interval (0.01, 0.99)
+        return float(max(0.01, min(0.99, raw)))
 
     def progress_summary(self) -> Dict[str, Any]:
         """

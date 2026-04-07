@@ -380,7 +380,9 @@ def run_task(client: OpenAI, task_id: str, seed: int = BASELINE_SEED) -> float:
             total_issues = obs.total_issues or 1
             max_reward   = (total_issues * 0.15) + 0.60
             total_reward = sum(rewards)
-            score        = max(0.0, min(1.0, total_reward / max_reward))
+            # Clamp to strictly open interval (0.01, 0.99)
+            # Validator rejects exact 0.0 and exact 1.0
+            score        = max(0.01, min(0.99, total_reward / max_reward))
             success      = score >= SUCCESS_THRESHOLD
 
     except ConnectionError as e:
