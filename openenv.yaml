@@ -1,6 +1,3 @@
-# CRM Sanitizer — OpenEnv Manifest
-# This file is read by `openenv validate` during judging
-
 name: crm-sanitizer
 version: "1.0.0"
 description: >
@@ -8,13 +5,11 @@ description: >
   and reason over messy customer data — the task every revenue
   operations team does manually, every single day.
 
-author: your-hf-username
+author: KoderKartik
 license: MIT
 
-# Environment entry point
 entry_point: server.app:app
 
-# The three tasks judges will evaluate
 tasks:
   - id: easy_basic_fix
     name: "Easy — Basic CRM Audit & Fix"
@@ -23,7 +18,7 @@ tasks:
       and one phone format issue. Full issue hints provided.
     difficulty: easy
     max_steps: 15
-    reward_threshold: 0.70
+    reward_threshold: 0.50
 
   - id: medium_format_dedup
     name: "Medium — Format Standardization & Deduplication"
@@ -33,7 +28,7 @@ tasks:
       are hinted, not specific rows.
     difficulty: medium
     max_steps: 20
-    reward_threshold: 0.55
+    reward_threshold: 0.40
 
   - id: hard_full_audit
     name: "Hard — Full Audit, No Hints"
@@ -43,9 +38,8 @@ tasks:
       discover all issues independently.
     difficulty: hard
     max_steps: 30
-    reward_threshold: 0.35
+    reward_threshold: 0.20
 
-# Action space summary
 actions:
   - fill_missing
   - remove_duplicate
@@ -56,7 +50,6 @@ actions:
   - flag_ambiguous
   - submit
 
-# Observation fields
 observation:
   - table_markdown
   - issues_remaining
@@ -65,16 +58,15 @@ observation:
   - last_action_result
   - task_description
   - step_number
-  - column_hint
+  - column_stats
+  - recent_actions
 
-# Hardware requirements (fits within competition limits)
 hardware:
   min_vcpu: 1
   min_memory_gb: 2
   recommended_vcpu: 2
   recommended_memory_gb: 4
 
-# Docker configuration
 docker:
   dockerfile: server/Dockerfile
   port: 7860

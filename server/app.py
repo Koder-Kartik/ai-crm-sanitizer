@@ -87,6 +87,21 @@ async def state():
         return JSONResponse(_http_env.state().model_dump())
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
+    
+@app.get("/score")
+async def score():
+    """
+    Returns current episode score strictly in (0.01, 0.99).
+    Called by openenv validate to check score range.
+    """
+    try:
+        if _http_env._grader is None:
+            # No episode started yet — return minimum valid score
+            return JSONResponse({"score": 0.01, "min": 0.01, "max": 0.99})
+        s = _http_env._grader.final_score()
+        return JSONResponse({"score": s, "min": 0.01, "max": 0.99})
+    except Exception as e:
+        return JSONResponse({"score": 0.01, "error": str(e)}, status_code=200)
 
 
 # ─────────────────────────────────────────────
