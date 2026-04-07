@@ -11,6 +11,7 @@ from typing import Any, Dict, Optional
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import RedirectResponse
 from pydantic import ValidationError
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -166,6 +167,10 @@ async def websocket_endpoint(websocket: WebSocket):
 # WEB UI — Full AI Agent Frontend
 # ─────────────────────────────────────────────
 
+@app.get("/")
+async def root():
+    return RedirectResponse(url="/web")
+
 @app.get("/web", response_class=HTMLResponse)
 async def web_ui():
     html = r"""
@@ -312,7 +317,7 @@ tr:hover td{background:#1e2130}
            value="Qwen/Qwen2.5-72B-Instruct">
     <input type="text" id="endpoint-input"
            placeholder="API endpoint"
-           value="https://router.huggingface.co/v1 ·"
+           value="https://router.huggingface.co/v1"
            style="width:240px">
   </div>
   <div class="token-hint">
@@ -860,7 +865,7 @@ def main():
     print(f"[CRM Sanitizer] Health:   http://{host}:{port}/health", flush=True)
 
     uvicorn.run(
-        "app:app",
+        "server.app:app",
         host=host,
         port=port,
         workers=1,
