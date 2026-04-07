@@ -219,33 +219,41 @@ def parse_action(text: str) -> Dict[str, Any]:
 # OBSERVATION FORMATTER
 # ─────────────────────────────────────────────
 
-def format_observation(obs, history: List[str]) -> str:
+def format_observation(obs: Any, history: List[str]) -> str:
     lines = []
 
-    remaining = (obs.total_issues or 0) - (obs.issues_fixed or 0)
+    # Guard all attribute accesses with getattr fallbacks
+    issues_fixed  = getattr(obs, "issues_fixed",  0) or 0
+    total_issues  = getattr(obs, "total_issues",  0) or 0
+    remaining     = total_issues - issues_fixed
+
     lines.append(
-        f"Progress: {obs.issues_fixed or 0} fixed, "
-        f"{remaining} remaining out of {obs.total_issues or 0} total"
+        f"Progress: {issues_fixed} fixed, "
+        f"{remaining} remaining out of {total_issues} total"
     )
 
-    if obs.last_action_result and "Episode started" not in obs.last_action_result:
-        lines.append(f"Last action result: {obs.last_action_result}")
+    last_action_result = getattr(obs, "last_action_result", None)
+    if last_action_result and "Episode started" not in last_action_result:
+        lines.append(f"Last action result: {last_action_result}")
 
     # Recent actions memory — stops agent repeating itself
-    if hasattr(obs, 'recent_actions') and obs.recent_actions:
+    recent_actions = getattr(obs, "recent_actions", None)
+    if recent_actions:
         lines.append("\nACTIONS ALREADY TAKEN (DO NOT REPEAT THESE):")
-        for a in obs.recent_actions:
+        for a in recent_actions:
             lines.append(f"  ✓ {a}")
 
-    if obs.issues_remaining:
+    issues_remaining = getattr(obs, "issues_remaining", None)
+    if issues_remaining:
         lines.append("\nISSUES TO FIX:")
-        for hint in obs.issues_remaining:
+        for hint in issues_remaining:
             lines.append(f"  - {hint}")
     else:
         lines.append("\nNo hints. Find issues by reading the table carefully.")
 
-    if obs.column_stats and not obs.column_stats.get("error"):
-        s = obs.column_stats
+    column_stats = getattr(obs, "column_stats", None)
+    if column_stats and not column_stats.get("error"):
+        s = column_stats
         lines.append(
             f"\nColumn '{s.get('column','')}' stats: "
             f"nulls={s.get('null_count',0)}, "
@@ -257,11 +265,12 @@ def format_observation(obs, history: List[str]) -> str:
         for h in history[-3:]:
             lines.append(f"  {h}")
 
-    lines.append(f"\nCURRENT TABLE:\n{obs.table_markdown}")
+    table_markdown = getattr(obs, "table_markdown", "")
+    lines.append(f"\nCURRENT TABLE:\n{table_markdown}")
 
     if remaining == 0:
         lines.append("\nALL ISSUES FIXED. Call submit now.")
-    elif obs.issues_remaining:
+    elif issues_remaining:
         lines.append("\nFix the next issue from the list above.")
 
     return "\n".join(lines)
@@ -303,14 +312,21 @@ def call_llm(client: OpenAI, step: int, observation_text: str) -> str:
 # ─────────────────────────────────────────────
 
 def run_task(client: OpenAI, task_id: str, seed: int = BASELINE_SEED) -> float:
-    from client import CRMSanitizerEnv, CRMAction
+    # Import here so an ImportError gives a clear message instead of crashing
+    try:
+        from client import CRMSanitizerEnv, CRMAction
+    except ImportError as e:
+        print(f"[ERROR] Could not import client module: {e}", flush=True)
+        print("[ERROR] Make sure client.py is in the same directory.", flush=True)
+        log_end(success=False, steps=0, score=0.01, rewards=[])
+        return 0.01
 
     max_steps   = MAX_STEPS[task_id]
-    rewards     = []
+    rewards: List[float] = []
     steps_taken = 0
-    score       = 0.0
+    score       = 0.01
     success     = False
-    history     = []
+    history: List[str] = []
 
     log_start(task=task_id, env=BENCHMARK, model=MODEL_NAME)
 
@@ -320,16 +336,17 @@ def run_task(client: OpenAI, task_id: str, seed: int = BASELINE_SEED) -> float:
             result = env.reset(task_id=task_id, seed=seed)
             obs    = result.observation
 
+            total_issues = getattr(obs, "total_issues", 0) or 0
             print(
                 f"[DEBUG] '{task_id}' started. "
-                f"Issues: {obs.total_issues}. "
+                f"Issues: {total_issues}. "
                 f"Max steps: {max_steps}",
                 flush=True,
             )
 
             for step in range(1, max_steps + 1):
 
-                if result.done:
+                if getattr(result, "done", False):
                     break
 
                 obs_text    = format_observation(obs, history)
@@ -347,11 +364,12 @@ def run_task(client: OpenAI, task_id: str, seed: int = BASELINE_SEED) -> float:
                 result = env.step(action)
                 obs    = result.observation
 
-                reward      = result.reward or 0.0
-                done        = result.done
+                reward      = getattr(result, "reward", 0.0) or 0.0
+                done        = getattr(result, "done", False)
                 rewards.append(reward)
                 steps_taken = step
 
+                last_result = getattr(obs, "last_action_result", "")
                 action_summary = (
                     f"{action.operation}("
                     f"uid={action.row_uid},"
@@ -370,15 +388,15 @@ def run_task(client: OpenAI, task_id: str, seed: int = BASELINE_SEED) -> float:
                 history.append(
                     f"Step {step}: {action.operation} "
                     f"uid={action.row_uid} "
-                    f"→ reward={reward:+.2f} "
-                    f"({obs.last_action_result})"
+                    f"\u2192 reward={reward:+.2f} "
+                    f"({last_result})"
                 )
 
                 if done:
                     break
 
-            total_issues = obs.total_issues or 1
-            max_reward   = (total_issues * 0.15) + 0.60
+            obs_total = getattr(obs, "total_issues", None) or total_issues or 1
+            max_reward   = (obs_total * 0.15) + 0.60
             total_reward = sum(rewards)
             # Clamp to strictly open interval (0.01, 0.99)
             # Validator rejects exact 0.0 and exact 1.0
@@ -402,6 +420,43 @@ def run_task(client: OpenAI, task_id: str, seed: int = BASELINE_SEED) -> float:
         )
 
     return score
+
+
+# ─────────────────────────────────────────────
+# SERVER READINESS CHECK
+# ─────────────────────────────────────────────
+
+def wait_for_server(server_url: str, max_wait: int = 60) -> bool:
+    """
+    Polls the server until it responds or timeout is reached.
+    Falls back gracefully if the client module lacks wait_until_ready.
+    """
+    try:
+        from client import CRMSanitizerEnv
+        probe = CRMSanitizerEnv(base_url=server_url)
+        # Use built-in method if available, otherwise poll manually
+        if hasattr(probe, "wait_until_ready"):
+            ready = probe.wait_until_ready(max_wait=max_wait)
+            probe.close()
+            return ready
+        else:
+            probe.close()
+            # Manual poll fallback
+            import urllib.request
+            deadline = time.time() + max_wait
+            while time.time() < deadline:
+                try:
+                    urllib.request.urlopen(server_url, timeout=3)
+                    return True
+                except Exception:
+                    time.sleep(2)
+            return False
+    except ImportError as e:
+        print(f"[ERROR] Could not import client module: {e}", flush=True)
+        return False
+    except Exception as e:
+        print(f"[ERROR] Server check failed: {e}", flush=True)
+        return False
 
 
 # ─────────────────────────────────────────────
@@ -470,16 +525,13 @@ def main() -> None:
 
     # ── Check server ──
     print("[INFO] Checking server...", flush=True)
-    from client import CRMSanitizerEnv
-    probe = CRMSanitizerEnv(base_url=SERVER_URL)
-    if not probe.wait_until_ready(max_wait=60):
+    if not wait_for_server(SERVER_URL, max_wait=60):
         print(f"[ERROR] Server not responding at {SERVER_URL}", flush=True)
         sys.exit(1)
-    probe.close()
     print("[INFO] Server ready.\n", flush=True)
 
     # ── Run tasks ──
-    scores = {}
+    scores: Dict[str, float] = {}
 
     for task_id in tasks_to_run:
         print(f"\n{'─' * 60}", flush=True)
@@ -529,4 +581,12 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\n[INFO] Interrupted by user.", flush=True)
+        sys.exit(1)
+    except Exception as e:
+        print(f"[FATAL] Unhandled exception: {e}", flush=True)
+        traceback.print_exc()
+        sys.exit(1)
