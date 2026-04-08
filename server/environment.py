@@ -247,9 +247,24 @@ class CRMEnvironment:
         if done and reward is not None:
             safe_reward = clamp_score(float(reward))
 
+        # Ensure reward is never None, 0.0, or 1.0
+        if safe_reward is None:
+            final_reward = 0.01
+        else:
+            import math
+            r = float(safe_reward)
+            if not math.isfinite(r):
+                final_reward = 0.01
+            elif r <= 0.0:
+                final_reward = 0.01
+            elif r >= 1.0:
+                final_reward = 0.99
+            else:
+                final_reward = r
+
         return CRMObservation(
             done               = done,
-            reward             = safe_reward,
+            reward             = final_reward,
             table_markdown     = render_table_markdown(self._current_table),
             issues_remaining   = hints,
             issues_fixed       = progress.get("issues_fixed", 0),

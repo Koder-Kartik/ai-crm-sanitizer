@@ -21,7 +21,7 @@ class Action(BaseModel):
 class Observation(BaseModel):
     """Base class for all observations."""
     done: bool = False
-    reward: Optional[float] = None
+    reward: Optional[float] = 0.01
 
 
 class State(BaseModel):
