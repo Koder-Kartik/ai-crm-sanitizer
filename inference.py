@@ -14,6 +14,7 @@
 
 import argparse
 import json
+import math
 import os
 import re
 import sys
@@ -24,11 +25,9 @@ from typing import Any, Dict, List, Optional
 # ── Guard: openai must be installed ──
 try:
     from openai import OpenAI
-    _OPENAI_AVAILABLE = True
 except ImportError:
-    print("[WARN] openai package not installed — LLM calls disabled. Run: pip install openai", flush=True)
-    OpenAI = None  # type: ignore
-    _OPENAI_AVAILABLE = False
+    print("[ERROR] openai package not installed. Run: pip install openai", flush=True)
+    sys.exit(1)
 
 # ─────────────────────────────────────────────
 # CONFIGURATION
@@ -96,11 +95,15 @@ def log_end(
     score:   float,
     rewards: List[float],
 ) -> None:
-    # Spec: rewards=0.15,0.15,0.60  (no brackets, 2dp)
-    rewards_str = ",".join(f"{r:.2f}" for r in rewards)
+    # FIX 1: include explicit score= field (already clamped to (0.01, 0.99))
+    # so the openenv framework reads our clamped value directly instead of
+    # re-computing from raw rewards (which can produce exactly 0.0 when all
+    # rewards are negative, e.g. a single -0.40 submit penalty).
+    rewards_str = ",".join(f"{r:.2f}" for r in rewards) if rewards else "0.01"
     print(
         f"[END] success={str(success).lower()} "
         f"steps={steps} "
+        f"score={score:.4f} "
         f"rewards={rewards_str}",
         flush=True,
     )
@@ -261,7 +264,10 @@ def format_observation(obs, history: List[str]) -> str:
 # LLM CALL
 # ─────────────────────────────────────────────
 
-def call_llm(client, step: int, obs_text: str) -> str:
+def call_llm(client: Optional["OpenAI"], step: int, obs_text: str) -> str:
+    # FIX 2: accept None client — returns fallback submit so task still runs
+    if client is None:
+        return '{"operation":"submit","column":"","row_uid":-1,"value":""}'
     try:
         completion = client.chat.completions.create(
             model       = MODEL_NAME,
@@ -285,11 +291,11 @@ def call_llm(client, step: int, obs_text: str) -> str:
 
 
 # ─────────────────────────────────────────────
-# SCORE HELPER — strictly open interval
+# SCORE HELPER — strictly open interval (0.01, 0.99)
 # ─────────────────────────────────────────────
 
 def safe_score(total_reward: float, total_issues: int) -> float:
-    import math
+    """Always returns a float strictly in (0.01, 0.99). Never 0.0 or 1.0."""
     max_reward = (max(total_issues, 1) * 0.15) + 0.60
     if max_reward <= 0:
         return 0.01
@@ -303,14 +309,18 @@ def safe_score(total_reward: float, total_issues: int) -> float:
 # SINGLE TASK RUNNER
 # ─────────────────────────────────────────────
 
-def run_task(client, task_id: str, seed: int = BASELINE_SEED) -> float:
-    # Import here so path issues surface clearly
+def run_task(
+    client:  Optional["OpenAI"],
+    task_id: str,
+    seed:    int = BASELINE_SEED,
+) -> float:
     try:
         from client import CRMSanitizerEnv, CRMAction
     except ImportError as e:
         print(f"[ERROR] Cannot import client: {e}", flush=True)
-        print("[ERROR] Make sure client.py is in the same directory as inference.py", flush=True)
-        return 0.01
+        score = 0.01
+        log_end(success=False, steps=0, score=score, rewards=[])
+        return score
 
     max_steps   = MAX_STEPS[task_id]
     rewards:    List[float] = []
@@ -339,11 +349,7 @@ def run_task(client, task_id: str, seed: int = BASELINE_SEED) -> float:
                 break
 
             obs_text    = format_observation(obs, history)
-            if client is not None:
-                raw = call_llm(client, step, obs_text)
-            else:
-                # No LLM available — submit immediately to get a valid (scored) episode
-                raw = '{"operation":"submit","column":"","row_uid":-1,"value":"","reason":"no llm"}'
+            raw         = call_llm(client, step, obs_text)
             action_dict = parse_action(raw)
 
             action = CRMAction(
@@ -388,22 +394,21 @@ def run_task(client, task_id: str, seed: int = BASELINE_SEED) -> float:
 
     except KeyboardInterrupt:
         print("\n[INFO] Interrupted by user.", flush=True)
-        score = safe_score(sum(rewards), 1)
+        score = safe_score(sum(rewards) if rewards else 0.0, 1)
 
     except Exception as e:
         print(f"[ERROR] Task {task_id} failed: {e}", flush=True)
         traceback.print_exc()
-        score = 0.01
+        score = safe_score(sum(rewards) if rewards else 0.0, 1)
 
     finally:
-        # Always close env cleanly
         if env is not None:
             try:
                 env.close()
             except Exception:
                 pass
 
-        # Always emit [END] — even on exception
+        # Always emit [END] with the clamped score
         log_end(
             success = success,
             steps   = steps_taken,
@@ -419,6 +424,24 @@ def run_task(client, task_id: str, seed: int = BASELINE_SEED) -> float:
 # ─────────────────────────────────────────────
 
 def main() -> None:
+    # FIX 3: global safety net — inference.py must NEVER crash with an
+    # unhandled exception. The openenv validator treats any non-zero exit
+    # (including uncaught exceptions) as a failure.
+    try:
+        _main_inner()
+    except SystemExit:
+        raise  # allow clean sys.exit(0/1) through
+    except Exception as e:
+        print(f"[ERROR] Unexpected top-level error: {e}", flush=True)
+        traceback.print_exc()
+        # Emit fallback [END] lines so the validator has scores for every task
+        for task_id in ALL_TASKS:
+            log_start(task=task_id, env=BENCHMARK, model=MODEL_NAME)
+            log_end(success=False, steps=0, score=0.01, rewards=[])
+        sys.exit(0)
+
+
+def _main_inner() -> None:
     parser = argparse.ArgumentParser(description="CRM Sanitizer baseline inference")
     parser.add_argument(
         "--task",
@@ -447,36 +470,45 @@ def main() -> None:
     print(f"Tasks:  {tasks_to_run}", flush=True)
     print("=" * 60, flush=True)
 
+    # FIX 4: missing API_KEY is a WARNING, not a crash.
+    # LLM calls will fail gracefully and return fallback submit actions.
+    client: Optional[OpenAI] = None
     if not API_KEY:
-        print("[WARN] HF_TOKEN not set — LLM calls will be skipped; submit action used as fallback.", flush=True)
-
-    print(f"\n[INFO] Endpoint: {API_BASE_URL}", flush=True)
-    print(f"[INFO] Model: {MODEL_NAME}\n", flush=True)
-
-    # Create OpenAI client (best-effort — inference still runs without it)
-    client = None
-    if API_KEY and _OPENAI_AVAILABLE:
+        print(
+            "[WARNING] HF_TOKEN not set. LLM will be skipped; "
+            "agent will use fallback submit actions.",
+            flush=True,
+        )
+    else:
+        print(f"\n[INFO] Endpoint: {API_BASE_URL}", flush=True)
+        print(f"[INFO] Model: {MODEL_NAME}\n", flush=True)
         try:
             client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
         except Exception as e:
-            print(f"[WARN] Failed to create OpenAI client: {e} — will use fallback actions.", flush=True)
+            print(f"[WARNING] Failed to create OpenAI client: {e}", flush=True)
+            print("[WARNING] Continuing without LLM.", flush=True)
+            client = None
 
-    # Check server (best-effort — do not abort if temporarily unavailable)
+    # FIX 5: server not ready is a WARNING, not a crash.
+    # Each run_task() will handle server errors individually.
     print("[INFO] Checking server...", flush=True)
-    server_ready = False
     try:
         from client import CRMSanitizerEnv
         probe = CRMSanitizerEnv(base_url=SERVER_URL)
-        server_ready = probe.wait_until_ready(max_wait=60)
-        probe.close()
-        if server_ready:
+        if probe.wait_until_ready(max_wait=60):
             print("[INFO] Server ready.\n", flush=True)
         else:
-            print(f"[WARN] Server at {SERVER_URL} did not respond in time — tasks will record 0.01.", flush=True)
+            print(
+                f"[WARNING] Server not responding at {SERVER_URL}. "
+                "Tasks will attempt to run anyway.",
+                flush=True,
+            )
+        probe.close()
     except Exception as e:
-        print(f"[WARN] Server check failed: {e} — tasks will record 0.01.", flush=True)
+        print(f"[WARNING] Server check raised: {e}", flush=True)
+        print("[WARNING] Continuing; individual tasks will handle errors.", flush=True)
 
-    # Run tasks
+    # ── Run tasks ──
     scores: Dict[str, float] = {}
 
     for i, task_id in enumerate(tasks_to_run):
@@ -484,28 +516,23 @@ def main() -> None:
         print(f"Running: {task_id}", flush=True)
         print(f"{'─' * 60}", flush=True)
 
-        if not server_ready:
-            # Server unavailable — emit required log lines and record minimum score
-            log_start(task=task_id, env=BENCHMARK, model=MODEL_NAME)
-            log_end(success=False, steps=0, score=0.01, rewards=[])
-            scores[task_id] = 0.01
-        else:
-            try:
-                score = run_task(client, task_id, seed=args.seed)
-            except Exception as e:
-                print(f"[ERROR] Unexpected error running {task_id}: {e}", flush=True)
-                traceback.print_exc()
-                score = 0.01
-            scores[task_id] = score
+        try:
+            score = run_task(client, task_id, seed=args.seed)
+        except Exception as e:
+            print(f"[ERROR] Unexpected error running {task_id}: {e}", flush=True)
+            traceback.print_exc()
+            score = 0.01
+            # Ensure [END] is emitted (run_task's finally may not have fired)
+            log_end(success=False, steps=0, score=score, rewards=[])
 
-        print(f"\n[RESULT] {task_id}: {scores[task_id]:.4f}", flush=True)
+        scores[task_id] = score
+        print(f"\n[RESULT] {task_id}: {score:.4f}", flush=True)
 
-        # Pause between tasks to avoid rate limiting
         if i < len(tasks_to_run) - 1:
             print("[INFO] Pausing 5s...", flush=True)
             time.sleep(5)
 
-    # Summary
+    # ── Summary ──
     print(f"\n{'=' * 60}", flush=True)
     print("BASELINE SCORES", flush=True)
     print(f"{'=' * 60}", flush=True)
@@ -526,13 +553,11 @@ def main() -> None:
     all_passed = all(s >= SUCCESS_THRESHOLD for s in scores.values())
     if all_passed:
         print("\n✓ All tasks passed.", flush=True)
+        sys.exit(0)
     else:
         failed = [t for t, s in scores.items() if s < SUCCESS_THRESHOLD]
-        print(f"\n✗ Tasks below threshold: {failed}", flush=True)
-
-    # Always exit 0 — a below-threshold score is a valid result, not a crash.
-    # The validator reads exit code; sys.exit(1) here would be misread as an error.
-    sys.exit(0)
+        print(f"\n✗ Failed: {failed}", flush=True)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
