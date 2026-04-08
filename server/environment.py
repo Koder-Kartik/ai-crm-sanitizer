@@ -65,15 +65,15 @@ class CRMEnvironment:
     SUPPORTS_CONCURRENT_SESSIONS = True
 
     def __init__(self):
-        self._task_data:     Optional[TaskData]          = None
+        self._task_data:     Optional[TaskData]             = None
         self._current_table: Optional[List[Dict[str, Any]]] = None
-        self._grader:        Optional[EpisodeGrader]     = None
-        self._episode_id:    Optional[str]               = None
-        self._step_count:    int                         = 0
-        self._done:          bool                        = False
-        self._seed:          int                         = 42
-        self._task_id:       str                         = ""
-        self._recent_actions: List[str]                  = []
+        self._grader:        Optional[EpisodeGrader]        = None
+        self._episode_id:    Optional[str]                  = None
+        self._step_count:    int                            = 0
+        self._done:          bool                           = False
+        self._seed:          int                            = 42
+        self._task_id:       str                            = ""
+        self._recent_actions: List[str]                     = []
 
     # ─────────────────────────────────────────
     # reset
@@ -86,11 +86,11 @@ class CRMEnvironment:
         episode_id: Optional[str] = None,
         **kwargs,
     ) -> CRMObservation:
-        self._seed          = seed if seed is not None else 42
-        self._task_id       = task_id
-        self._episode_id    = episode_id or str(uuid.uuid4())
-        self._step_count    = 0
-        self._done          = False
+        self._seed           = seed if seed is not None else 42
+        self._task_id        = task_id
+        self._episode_id     = episode_id or str(uuid.uuid4())
+        self._step_count     = 0
+        self._done           = False
         self._recent_actions = []
 
         self._task_data     = generate_task(task_id, self._seed)
@@ -197,12 +197,10 @@ class CRMEnvironment:
 
         self._done = done
 
-        # Clamp reward to avoid exact 0.0
-        clamped_reward = clamp_score(reward) if done else reward
-
+        # Pass raw reward as context; _build_observation always uses grader.final_score()
         return self._build_observation(
             last_action_result = result_message,
-            reward             = clamped_reward if done else reward,
+            reward             = reward,
             done               = done,
             column_stats       = column_stats_result,
         )
@@ -242,25 +240,22 @@ class CRMEnvironment:
         fixed_keys = self._grader.fixed_issues if self._grader else set()
         hints      = build_hints(self._task_data, fixed_keys)
 
-        # Ensure reward is never exactly 0.0 or 1.0 when episode is done
-        safe_reward = reward
-        if done and reward is not None:
-            safe_reward = clamp_score(float(reward))
-
-        # Ensure reward is never None, 0.0, or 1.0
-        if safe_reward is None:
-            final_reward = 0.01
-        else:
+        # Reward must ALWAYS be strictly in (0.01, 0.99) — every step, not just done.
+        # The raw action rewards (e.g. -0.40, 0.0, +0.60) are deltas, not valid scores.
+        # We normalise against max_possible_reward via grader.final_score() every time.
+        if self._grader is not None:
+            final_reward = self._grader.final_score()  # already clamped to [0.01, 0.99]
+        elif reward is not None:
             import math
-            r = float(safe_reward)
-            if not math.isfinite(r):
-                final_reward = 0.01
-            elif r <= 0.0:
+            r = float(reward)
+            if not math.isfinite(r) or r <= 0.0:
                 final_reward = 0.01
             elif r >= 1.0:
                 final_reward = 0.99
             else:
                 final_reward = r
+        else:
+            final_reward = 0.01
 
         return CRMObservation(
             done               = done,
